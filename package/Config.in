@@ -408,6 +408,7 @@ menu "Firmware"
 endmenu
 	source "package/18xx-ti-utils/Config.in"
 	source "package/a10disp/Config.in"
+	source "package/aic8800-usb/Config.in"
 	source "package/acpica/Config.in"
 	source "package/acpid/Config.in"
 	source "package/acpitool/Config.in"
