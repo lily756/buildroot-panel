@@ -1,0 +1,73 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Buildroot Board Support <buildroot@example.com>
+Date: Sat, 5 Sep 2026 18:30:00 +0800
+Subject: [PATCH] drm/panel: simple: add ZJY400-8532ANT panel
+
+The MangoPi R3 AIC8800D40 carrier uses a 4-inch ZJY400-8532ANT panel
+driven over an 18-bit RGB666 bus.  Add the module vendor's 720x720 timing
+(HSW/HBP/HFP 60/120/106 and VSW/VBP/VFP 4/20/20) at the board's 30 MHz
+pixel clock, with negative sync polarities, active-high data enable, and a
+falling-edge pixel drive convention.  The latter lets the NV3052C controller
+sample RGB data on the rising pixel-clock edge required by its timing
+specification.
+
+Panel reset is board-specific and is handled by an early userspace init
+script. Keep a short preparation delay before enabling video output.
+
+Signed-off-by: Buildroot Board Support <buildroot@example.com>
+---
+ drivers/gpu/drm/panel/panel-simple.c | 32 +++++++++++++++++++++++++++++
+ 1 file changed, 32 insertions(+)
+
+diff --git a/drivers/gpu/drm/panel/panel-simple.c b/drivers/gpu/drm/panel/panel-simple.c
+index f0ea782..b903ba4 100644
+--- a/drivers/gpu/drm/panel/panel-simple.c
++++ b/drivers/gpu/drm/panel/panel-simple.c
+@@ -3081,6 +3081,35 @@ static const struct panel_desc winstar_wf35ltiacd = {
+ 	.bus_format = MEDIA_BUS_FMT_RGB888_1X24,
+ };
+ 
++static const struct drm_display_mode zjy_zjy400_8532ant_mode = {
++	.clock = 30000,
++	.hdisplay = 720,
++	.hsync_start = 720 + 106,
++	.hsync_end = 720 + 106 + 60,
++	.htotal = 720 + 106 + 60 + 120,
++	.vdisplay = 720,
++	.vsync_start = 720 + 20,
++	.vsync_end = 720 + 20 + 4,
++	.vtotal = 720 + 20 + 4 + 20,
++	.flags = DRM_MODE_FLAG_NVSYNC | DRM_MODE_FLAG_NHSYNC,
++};
++
++static const struct panel_desc zjy_zjy400_8532ant = {
++	.modes = &zjy_zjy400_8532ant_mode,
++	.num_modes = 1,
++	.bpc = 6,
++	.size = {
++		.width = 72,
++		.height = 72,
++	},
++	.delay = {
++		.prepare = 10,
++	},
++	.bus_format = MEDIA_BUS_FMT_RGB666_1X18,
++	.bus_flags = DRM_BUS_FLAG_DE_HIGH |
++		     DRM_BUS_FLAG_PIXDATA_DRIVE_NEGEDGE,
++};
++
+ static const struct drm_display_mode arm_rtsm_mode[] = {
+ 	{
+ 		.clock = 65000,
+@@ -3437,6 +3466,9 @@ static const struct of_device_id platform_of_match[] = {
+ 		.compatible = "winstar,wf35ltiacd",
+ 		.data = &winstar_wf35ltiacd,
+ 	}, {
++		.compatible = "zjy,zjy400-8532ant",
++		.data = &zjy_zjy400_8532ant,
++	}, {
+ 		/* sentinel */
+ 	}
+ };
+-- 
+2.43.0

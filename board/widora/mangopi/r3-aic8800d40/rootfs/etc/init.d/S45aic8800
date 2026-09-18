@@ -1,0 +1,120 @@
+#!/bin/sh
+
+# Register both halves of the vendor driver before releasing PWR_KEY. The boot
+# PID binds to aic_load_fw; after firmware download, the runtime PID can bind to
+# aic8800_fdrv immediately, even when the re-enumeration window is very short.
+WIFI_EN_GPIO=132
+WIFI_EN_PATH=/sys/class/gpio/gpio${WIFI_EN_GPIO}
+USB_SYSFS=/sys/bus/usb/devices
+RUNTIME_USB_TIMEOUT=30
+INTERFACE_TIMEOUT=20
+
+wifi_export_gpio()
+{
+	if [ ! -d "${WIFI_EN_PATH}" ]; then
+		echo "${WIFI_EN_GPIO}" > /sys/class/gpio/export || return 1
+		# GPIO sysfs attributes are created asynchronously after export.
+		count=0
+		while [ ! -d "${WIFI_EN_PATH}" ]; do
+			count=$((count + 1))
+			[ "${count}" -ge 10 ] && return 1
+			sleep 1
+		done
+	fi
+}
+
+wifi_power_off()
+{
+	wifi_export_gpio || return 1
+
+	# Keep the direction=low write for an atomic safe state on first use, then
+	# explicitly update the data register as required by the suniv GPIO driver.
+	echo low > "${WIFI_EN_PATH}/direction" || return 1
+	echo 0 > "${WIFI_EN_PATH}/value"
+}
+
+wifi_power_on()
+{
+	wifi_export_gpio || return 1
+
+	# On this board, direction=high reads back as 1 but does not reliably
+	# propagate a rising edge to PWR_KEY.  The explicit value write does.
+	echo out > "${WIFI_EN_PATH}/direction" || return 1
+	echo 1 > "${WIFI_EN_PATH}/value"
+}
+
+aic_usb_pid_present()
+{
+	wanted_pids=$1
+
+	for usb_device in "${USB_SYSFS}"/*; do
+		[ -r "${usb_device}/idVendor" ] || continue
+		[ -r "${usb_device}/idProduct" ] || continue
+		read -r usb_vendor < "${usb_device}/idVendor" || continue
+		read -r usb_product < "${usb_device}/idProduct" || continue
+		[ "${usb_vendor}" = "a69c" ] || continue
+
+		case " ${wanted_pids} " in
+			*" ${usb_product} "*) return 0 ;;
+		esac
+	done
+
+	return 1
+}
+
+wait_for_runtime_usb()
+{
+	count=0
+	while [ "${count}" -lt "${RUNTIME_USB_TIMEOUT}" ]; do
+		# D80/D40 firmware normally re-enumerates as 8d81/8d41.
+		aic_usb_pid_present "8d81 8d41" && return 0
+		count=$((count + 1))
+		sleep 1
+	done
+	return 1
+}
+
+wait_for_wlan0()
+{
+	count=0
+	while [ ! -e /sys/class/net/wlan0 ]; do
+		count=$((count + 1))
+		[ "${count}" -ge "${INTERFACE_TIMEOUT}" ] && return 1
+		sleep 1
+	done
+}
+
+case "$1" in
+	start)
+		if ! wifi_power_off; then
+			echo "Failed to power down AIC8800 through WIFI_EN (PE4)" >&2
+			exit 1
+		fi
+
+		# Register both boot and runtime drivers before releasing PWR_KEY.
+		modprobe aic_load_fw || exit 1
+		modprobe aic8800_fdrv || exit 1
+		sleep 1
+		if ! wifi_power_on; then
+			echo "Failed to enable AIC8800 through WIFI_EN (PE4)" >&2
+			exit 1
+		fi
+
+		if ! wait_for_runtime_usb; then
+			if aic_usb_pid_present "8d80 8d40"; then
+				echo "AIC8800 remained in boot-ROM mode; firmware download failed" >&2
+			else
+				echo "AIC8800 runtime USB device did not appear" >&2
+			fi
+			exit 1
+		fi
+
+		if ! wait_for_wlan0; then
+			echo "AIC8800 runtime device found, but wlan0 did not appear" >&2
+			exit 1
+		fi
+		;;
+	stop)
+		wifi_power_off
+		;;
+esac

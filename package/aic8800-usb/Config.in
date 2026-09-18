@@ -1,0 +1,11 @@
+config BR2_PACKAGE_AIC8800_USB
+	bool "AIC8800 USB Wi-Fi driver"
+	depends on BR2_LINUX_KERNEL
+	help
+	  Out-of-tree USB Wi-Fi driver and firmware for AIC8800D40
+	  modules.
+	  The D40 USB ID is handled through the AIC8800D80 compatibility
+	  firmware set.
+
+comment "aic8800-usb needs a Linux kernel to be built"
+	depends on !BR2_LINUX_KERNEL

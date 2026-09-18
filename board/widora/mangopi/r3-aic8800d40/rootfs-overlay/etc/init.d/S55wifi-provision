@@ -1,0 +1,229 @@
+#!/bin/sh
+
+# Prefer a saved STA profile. If association or DHCP fails, reuse wlan0 as a
+# WPA2 provisioning AP; the CGI restarts this state machine after saving.
+
+PATH=/sbin:/usr/sbin:/bin:/usr/bin
+
+IFACE=wlan0
+AP_ADDRESS=192.168.4.1
+WIFI_DIR=/etc/wifi
+WPA_CONFIG=${WIFI_DIR}/wpa_supplicant.conf
+HOSTAPD_CONFIG=${WIFI_DIR}/hostapd.conf
+DNSMASQ_CONFIG=${WIFI_DIR}/dnsmasq-ap.conf
+WEB_ROOT=/www
+
+WPA_PID=/run/wpa_supplicant-wlan0.pid
+UDHCPC_PID=/run/udhcpc-wlan0.pid
+HOSTAPD_PID=/run/hostapd-wlan0.pid
+DNSMASQ_PID=/run/dnsmasq-ap.pid
+HTTPD_PID=/run/httpd-wifi-provision.pid
+MODE_FILE=/run/wifi-provision.mode
+
+INTERFACE_TIMEOUT=20
+ASSOCIATION_TIMEOUT=30
+DHCP_TIMEOUT=20
+
+pid_is_running()
+{
+	pid_file=$1
+	[ -s "$pid_file" ] || return 1
+	pid=$(sed -n '1p' "$pid_file")
+	case "$pid" in
+		''|*[!0-9]*) return 1 ;;
+	esac
+	kill -0 "$pid" 2>/dev/null
+}
+
+stop_pid_file()
+{
+	pid_file=$1
+	if pid_is_running "$pid_file"; then
+		pid=$(sed -n '1p' "$pid_file")
+		kill -TERM "$pid" 2>/dev/null || true
+		sleep 1
+		kill -0 "$pid" 2>/dev/null && kill -KILL "$pid" 2>/dev/null
+	fi
+	rm -f "$pid_file"
+}
+
+stop_services()
+{
+	stop_pid_file "$HTTPD_PID"
+	stop_pid_file "$DNSMASQ_PID"
+	stop_pid_file "$HOSTAPD_PID"
+	stop_pid_file "$UDHCPC_PID"
+	stop_pid_file "$WPA_PID"
+	rm -f /run/wpa_supplicant/${IFACE} "$MODE_FILE"
+	if [ -e "/sys/class/net/${IFACE}" ]; then
+		ip addr flush dev "$IFACE" 2>/dev/null || true
+		ip link set "$IFACE" down 2>/dev/null || true
+	fi
+}
+
+wait_for_interface()
+{
+	count=0
+	while [ ! -e "/sys/class/net/${IFACE}" ]; do
+		count=$((count + 1))
+		[ "$count" -ge "$INTERFACE_TIMEOUT" ] && return 1
+		sleep 1
+	done
+}
+
+have_sta_credentials()
+{
+	[ -s "$WPA_CONFIG" ] &&
+		grep -q '^[[:space:]]*ssid=' "$WPA_CONFIG"
+}
+
+prepare_interface()
+{
+	mode=$1
+	ip link set "$IFACE" down || return 1
+	ip addr flush dev "$IFACE" 2>/dev/null || true
+	iw dev "$IFACE" set type "$mode" || return 1
+	ip link set "$IFACE" up
+}
+
+start_sta()
+{
+	prepare_interface managed || return 1
+	mkdir -p /run/wpa_supplicant
+	rm -f "/run/wpa_supplicant/${IFACE}" "$WPA_PID" "$UDHCPC_PID"
+
+	wpa_supplicant -B -P "$WPA_PID" -D nl80211 \
+		-i "$IFACE" -c "$WPA_CONFIG" >/dev/null 2>&1 || return 1
+
+	count=0
+	while [ "$count" -lt "$ASSOCIATION_TIMEOUT" ]; do
+		if wpa_cli -p /run/wpa_supplicant -i "$IFACE" status 2>/dev/null |
+			grep -q '^wpa_state=COMPLETED$'; then
+			break
+		fi
+		if ! pid_is_running "$WPA_PID"; then
+			stop_pid_file "$WPA_PID"
+			return 1
+		fi
+		count=$((count + 1))
+		sleep 1
+	done
+
+	if [ "$count" -ge "$ASSOCIATION_TIMEOUT" ]; then
+		stop_pid_file "$WPA_PID"
+		return 1
+	fi
+
+	udhcpc -f -i "$IFACE" -p "$UDHCPC_PID" \
+		-s /usr/share/udhcpc/default.script >/dev/null 2>&1 &
+	udhcpc_pid=$!
+	printf '%s\n' "$udhcpc_pid" > "$UDHCPC_PID"
+
+	count=0
+	while [ "$count" -lt "$DHCP_TIMEOUT" ]; do
+		if ip -4 addr show dev "$IFACE" 2>/dev/null |
+			grep -q '^[[:space:]]*inet '; then
+			printf '%s\n' sta > "$MODE_FILE"
+			return 0
+		fi
+		kill -0 "$udhcpc_pid" 2>/dev/null || break
+		count=$((count + 1))
+		sleep 1
+	done
+
+	stop_pid_file "$UDHCPC_PID"
+	stop_pid_file "$WPA_PID"
+	return 1
+}
+
+start_ap()
+{
+	prepare_interface __ap || return 1
+	ip addr add "${AP_ADDRESS}/24" dev "$IFACE" || return 1
+	mkdir -p /run/hostapd
+
+	rm -f "$HOSTAPD_PID" "$DNSMASQ_PID" "$HTTPD_PID"
+	hostapd -B -P "$HOSTAPD_PID" "$HOSTAPD_CONFIG" >/dev/null 2>&1 ||
+		return 1
+	sleep 1
+	pid_is_running "$HOSTAPD_PID" || return 1
+
+	dnsmasq --conf-file="$DNSMASQ_CONFIG" || return 1
+	sleep 1
+	pid_is_running "$DNSMASQ_PID" || return 1
+
+	httpd -f -p "${AP_ADDRESS}:80" -h "$WEB_ROOT" >/dev/null 2>&1 &
+	httpd_pid=$!
+	printf '%s\n' "$httpd_pid" > "$HTTPD_PID"
+	sleep 1
+	kill -0 "$httpd_pid" 2>/dev/null || return 1
+
+	printf '%s\n' ap > "$MODE_FILE"
+	return 0
+}
+
+check_commands()
+{
+	for command_name in ip iw wpa_supplicant wpa_cli udhcpc \
+		hostapd dnsmasq httpd; do
+		command -v "$command_name" >/dev/null 2>&1 || {
+			echo "missing command: $command_name"
+			return 1
+		}
+	done
+}
+
+start_wifi()
+{
+	check_commands || return 1
+	wait_for_interface || {
+		echo "interface ${IFACE} did not appear"
+		return 1
+	}
+
+	chmod 0600 "$HOSTAPD_CONFIG" "$WPA_CONFIG" 2>/dev/null || true
+	stop_services
+
+	if have_sta_credentials; then
+		if start_sta; then
+			echo "connected as STA"
+			return 0
+		fi
+		echo "STA connection failed; starting provisioning AP"
+	fi
+
+	if start_ap; then
+		echo "provisioning AP ready at http://${AP_ADDRESS}/"
+		return 0
+	fi
+
+	stop_services
+	return 1
+}
+
+case "$1" in
+	start)
+		printf 'Starting Wi-Fi: '
+		if start_wifi; then
+			echo "OK"
+		else
+			echo "FAIL"
+			exit 1
+		fi
+		;;
+	stop)
+		printf 'Stopping Wi-Fi: '
+		stop_services
+		echo "OK"
+		;;
+	restart)
+		"$0" stop
+		"$0" start
+		;;
+	*)
+		echo "Usage: $0 {start|stop|restart}"
+		exit 1
+		;;
+esac
+
+exit 0

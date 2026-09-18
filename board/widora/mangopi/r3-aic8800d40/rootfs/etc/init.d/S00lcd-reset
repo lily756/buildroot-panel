@@ -1,0 +1,46 @@
+#!/bin/sh
+
+# PE11 is GPIO 4 * 32 + 11 = 139 on the suniv pin controller.
+# Reset the LCD once, as early as possible in userspace, then leave RESET_N
+# deasserted.  sysfs is already mounted by BusyBox init before rcS is run.
+LCD_RESET_GPIO=139
+LCD_RESET_PATH=/sys/class/gpio/gpio${LCD_RESET_GPIO}
+
+lcd_set_level()
+{
+	level=$1
+
+	if [ ! -d "${LCD_RESET_PATH}" ]; then
+		echo "${LCD_RESET_GPIO}" > /sys/class/gpio/export || return 1
+	fi
+
+	# "low"/"high" select output direction and value atomically.
+	echo "${level}" > "${LCD_RESET_PATH}/direction"
+}
+
+case "$1" in
+	start)
+		if ! lcd_set_level low; then
+			echo "Failed to assert LCD RESET_N through PE11" >&2
+			exit 1
+		fi
+
+		usleep 20000
+
+		if ! lcd_set_level high; then
+			echo "Failed to release LCD RESET_N through PE11" >&2
+			exit 1
+		fi
+
+		echo "LCD RESET_N released after 20 ms"
+		;;
+	stop)
+		# Keep RESET_N high across shutdown; power removal resets the panel.
+		;;
+	*)
+		echo "Usage: $0 {start|stop}"
+		exit 1
+		;;
+esac
+
+exit 0

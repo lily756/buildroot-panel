@@ -1,0 +1,130 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Buildroot Board Support <buildroot@example.com>
+Date: Tue, 8 Sep 2026 12:00:00 +0800
+Subject: [PATCH] usb: musb: diagnose suniv bulk OUT stalls
+
+The AIC8800 firmware loader leaves the first 512-byte PIO packet pending in
+the F1C200s MUSB TX FIFO.  At failure TXCSR is 0x2103: host TX mode, data
+toggle one, TXPKTRDY and FIFONOTEMPTY, without ERROR, RXSTALL or
+NAKTIMEOUT.
+
+TXCSR alone cannot distinguish a peripheral which keeps returning NAK from
+a controller which did not issue or complete the token.  The generic MUSB
+code programs TXINTERVAL to zero for a non-multiplexed bulk endpoint, which
+also disables the hardware NAK limit.
+
+For suniv only, program the normal MUSB bulk NAK interval (16 ms at high
+speed and 8 ms at full speed), report a rate-limited snapshot when the
+hardware raises NAKTIMEOUT, and extend the abort snapshot with the
+Allwinner-specific VEND0 and dynamic FIFO registers.  VEND0 bit 0 shows
+whether the controller unexpectedly switched away from PIO; the FIFO
+registers verify that endpoint 2 points at the intended SRAM window.
+
+This patch is diagnostic.  It deliberately leaves packet sizing and the
+AIC firmware-loader protocol unchanged.
+
+Signed-off-by: Buildroot Board Support <buildroot@example.com>
+---
+ drivers/usb/musb/musb_host.c | 57 ++++++++++++++++++++++++++++++++++++-
+ 1 file changed, 56 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/usb/musb/musb_host.c b/drivers/usb/musb/musb_host.c
+index 9f82808..2222222 100644
+--- a/drivers/usb/musb/musb_host.c
++++ b/drivers/usb/musb/musb_host.c
+@@ -15,6 +15,7 @@
+ #include <linux/slab.h>
+ #include <linux/errno.h>
+ #include <linux/list.h>
++#include <linux/of.h>
+ #include <linux/dma-mapping.h>
+ 
+ #include "musb_core.h"
+@@ -76,6 +77,19 @@ struct musb *hcd_to_musb(struct usb_hcd *hcd)
+ }
+ 
+ 
++static bool musb_is_suniv(struct musb *musb)
++{
++	struct device *parent = musb->controller->parent;
++
++	return parent && of_device_is_compatible(parent->of_node,
++						 "allwinner,suniv-f1c100s-musb");
++}
++
++/* Raw Allwinner register offsets, after its non-standard MUSB remapping. */
++#define SUNIV_MUSB_INDEX		0x42
++#define SUNIV_MUSB_VEND0		0x43
++
++
+ static void musb_ep_program(struct musb *musb, u8 epnum,
+ 			struct urb *urb, int is_out,
+ 			u8 *buf, u32 offset, u32 len);
+@@ -1264,6 +1278,14 @@ void musb_host_tx(struct musb *musb, u8 epnum)
+ 		status = -ETIMEDOUT;
+ 
+ 	} else if (tx_csr & MUSB_TXCSR_H_NAKTIMEOUT) {
++		if (musb_is_suniv(musb))
++			dev_warn_ratelimited(musb->controller,
++				"musb-txdiag NAK ep=%u csr=%04x off=%u seg=%u "
++				"total=%u intv=%u frame=%u\n",
++				epnum, tx_csr, qh->offset, qh->segsize,
++				urb->transfer_buffer_length,
++				musb_readb(epio, MUSB_TXINTERVAL),
++				musb_readw(mbase, MUSB_FRAME));
+ 		if (USB_ENDPOINT_XFER_BULK == qh->type && qh->mux == 1
+ 				&& !list_is_singular(&musb->out_bulk)) {
+ 			musb_dbg(musb, "NAK timeout on TX%d ep", epnum);
+@@ -2262,7 +2284,11 @@ static int musb_urb_enqueue(
+ 		 *
+ 		 * The upside of disabling it is simpler transfer scheduling.
+ 		 */
+-		interval = 0;
++		if (qh->type == USB_ENDPOINT_XFER_BULK &&
++		    musb_is_suniv(musb))
++			interval = (USB_SPEED_HIGH == urb->dev->speed) ? 8 : 4;
++		else
++			interval = 0;
+ 	}
+ 	qh->intv_reg = interval;
+ 
+@@ -2359,6 +2385,37 @@ static int musb_cleanup_urb(struct urb *urb, struct musb_qh *qh)
+ 		if (is_dma_capable() && dma)
+ 			musb_platform_clear_ep_rxintr(musb, ep->epnum);
+ 	} else if (ep->epnum) {
++		csr = musb_readw(epio, MUSB_TXCSR);
++		dev_warn(musb->controller,
++			 "musb-txdiag abort ep=%u csr=%04x off=%u seg=%u total=%u "
++			 "maxp=%u intv=%u txtype=%02x txmaxp=%04x frame=%u "
++			 "devctl=%02x power=%02x intrtx=%04x intrtxe=%04x "
++			 "sw-inttx=%04x status=%d\n",
++			 ep->epnum, csr, qh->offset, qh->segsize,
++			 urb->transfer_buffer_length, qh->maxpacket,
++			 musb_readb(epio, MUSB_TXINTERVAL),
++			 musb_readb(epio, MUSB_TXTYPE),
++			 musb_readw(epio, MUSB_TXMAXP),
++			 musb_readw(regs, MUSB_FRAME),
++			 musb_readb(regs, MUSB_DEVCTL),
++			 musb_readb(regs, MUSB_POWER),
++			 musb_readw(regs, MUSB_INTRTX),
++			 musb_readw(regs, MUSB_INTRTXE),
++			 musb->int_tx, urb->status);
++
++		if (musb_is_suniv(musb))
++			dev_warn(musb->controller,
++				 "musb-txdiag suniv index=%02x vend0=%02x "
++				 "intrusb=%02x intrusbe=%02x "
++				 "txfifo=%02x@%04x rxfifo=%02x@%04x "
++				 "txfunc=%02x txhub=%02x/%02x\n",
++				 readb(regs + SUNIV_MUSB_INDEX),
++				 readb(regs + SUNIV_MUSB_VEND0),
++				 readb(regs + 0x4c), readb(regs + 0x50),
++				 readb(regs + 0x90), readw(regs + 0x92),
++				 readb(regs + 0x94), readw(regs + 0x96),
++				 readb(regs + 0x98), readb(regs + 0x9a),
++				 readb(regs + 0x9b));
+ 		musb_h_tx_flush_fifo(ep);
+ 		csr = musb_readw(epio, MUSB_TXCSR);
+ 		csr &= ~(MUSB_TXCSR_AUTOSET
+-- 
+2.43.0

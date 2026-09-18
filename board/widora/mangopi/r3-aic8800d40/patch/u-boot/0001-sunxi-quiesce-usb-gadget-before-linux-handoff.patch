@@ -1,0 +1,79 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Buildroot Board Support <buildroot@example.com>
+Date: Fri, 5 Sep 2026 18:00:00 +0800
+Subject: [PATCH] sunxi: prepare shared USB controller for Wi-Fi host mode
+
+The MangoPi R3 AIC8800D40 board uses the sole MUSB controller as a Linux
+USB host for an internally connected Wi-Fi module.  U-Boot initially
+probes the controller as a gadget for recovery features, but leaving it in
+peripheral mode prevents the attached module from seeing the first host
+connect event.
+
+Hold the module's WIFI_EN signal low from board_init() so that it cannot
+claim the shared bus while U-Boot is serving DFU or UMS.  Linux owns PE4
+and enables the module only after switching MUSB to host mode.
+
+Remove the active gadget device during the normal U-Boot-to-Linux handoff.
+Interactive U-Boot DFU and UMS stay available until Linux is booted.
+
+Signed-off-by: Buildroot Board Support <buildroot@example.com>
+---
+ board/sunxi/board.c | 31 +++++++++++++++++++++++++++++++
+ 1 file changed, 31 insertions(+)
+
+diff --git a/board/sunxi/board.c b/board/sunxi/board.c
+index 83c58762f1..0a3cc08f76 100644
+--- a/board/sunxi/board.c
++++ b/board/sunxi/board.c
+@@ -12,6 +12,7 @@
+ 
+ #include <common.h>
+ #include <dm.h>
++#include <dm/device-internal.h>
+ #include <env.h>
+ #include <hang.h>
+ #include <image.h>
+@@ -226,6 +227,20 @@
+ 
+ 	gd->bd->bi_boot_params = (PHYS_SDRAM_0 + 0x100);
+ 
++	/*
++	 * MUSB is a DFU/UMS gadget in U-Boot, while the internal AIC8800D40
++	 * is a USB device.  Keep the module disconnected until Linux switches
++	 * the controller to host mode and takes ownership of WIFI_EN.
++	 */
++	ret = gpio_request(SUNXI_GPE(4), "wifi-enable");
++	if (ret) {
++		printf("Failed to request WIFI_EN: %d\n", ret);
++	} else {
++		ret = gpio_direction_output(SUNXI_GPE(4), 0);
++		if (ret)
++			printf("Failed to disable Wi-Fi module: %d\n", ret);
++	}
++
+ #if !defined(CONFIG_ARM64) && !defined(CONFIG_MACH_SUNIV)
+ 	asm volatile("mrc p15, 0, %0, c0, c1, 1" : "=r"(id_pfr1));
+ 	debug("id_pfr1: 0x%08x\n", id_pfr1);
+@@ -913,6 +928,22 @@
+ 	return 0;
+ }
+ 
++#ifdef CONFIG_USB_GADGET
++/*
++ * misc_init_r() probes MUSB as a USB gadget.  Linux uses the controller as a
++ * host, so leave the hardware in reset at the handoff.
++ */
++void board_quiesce_devices(void)
++{
++	struct udevice *usb_dev;
++
++	/* A missing gadget is harmless; it may have failed to probe earlier. */
++	if (!uclass_first_device(UCLASS_USB_GADGET_GENERIC, &usb_dev) &&
++	    usb_dev)
++		device_remove(usb_dev, DM_REMOVE_NORMAL);
++}
++#endif
++
+ int ft_board_setup(void *blob, bd_t *bd)
+ {
+ 	int __maybe_unused r;

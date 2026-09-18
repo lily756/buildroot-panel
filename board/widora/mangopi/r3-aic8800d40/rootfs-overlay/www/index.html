@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'">
+  <meta name="referrer" content="no-referrer">
+  <title>MangoPi Wi-Fi 配网</title>
+  <style>
+    :root { color-scheme: light; font-family: sans-serif; }
+    body { margin: 0; background: #f3f5f7; color: #18202a; }
+    main { box-sizing: border-box; max-width: 30rem; margin: 8vh auto; padding: 2rem; background: #fff; border-radius: 1rem; box-shadow: 0 0.5rem 2rem #0002; }
+    h1 { margin-top: 0; font-size: 1.6rem; }
+    p { line-height: 1.55; color: #4b5563; }
+    label { display: block; margin: 1rem 0 0.35rem; font-weight: 600; }
+    input, button { box-sizing: border-box; width: 100%; padding: 0.8rem; border-radius: 0.55rem; font: inherit; }
+    input { border: 1px solid #aeb7c2; }
+    button { margin-top: 1.4rem; border: 0; background: #1264d8; color: #fff; font-weight: 700; cursor: pointer; }
+    small { display: block; margin-top: 1rem; line-height: 1.5; color: #687385; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>连接设备到 Wi-Fi</h1>
+    <p>请输入目标无线网络的信息。保存后，配置热点会关闭，设备将尝试连接该网络。</p>
+    <form action="/cgi-bin/wifi-save.cgi" method="post" enctype="application/x-www-form-urlencoded" accept-charset="UTF-8">
+      <label for="ssid">Wi-Fi 名称（SSID）</label>
+      <input id="ssid" name="ssid" type="text" maxlength="32" autocomplete="off" required>
+
+      <label for="psk">Wi-Fi 密码</label>
+      <input id="psk" name="psk" type="password" minlength="8" maxlength="63" autocomplete="new-password" required>
+
+      <button type="submit">保存并连接</button>
+    </form>
+    <small>SSID 最多 32 字节；密码必须为 8–63 个可打印 ASCII 字符。设备不保存明文密码。</small>
+  </main>
+</body>
+</html>
